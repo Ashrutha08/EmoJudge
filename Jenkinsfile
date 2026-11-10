@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -21,6 +22,8 @@ pipeline {
         WEB_PORT = '5000'
         API_PORT = '8000'
 
+        K8S_NAMESPACE = 'default'
+
         GIT_EXE = 'C:\\Program Files\\Git\\cmd\\git.exe'
         DOCKER_EXE = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'
 
@@ -29,6 +32,7 @@ pipeline {
 
     stages {
 
+        // 1. Checkout source code
         stage('Checkout') {
             steps {
                 checkout scm
@@ -37,19 +41,30 @@ pipeline {
             }
         }
 
+        // 2. Check required tools
         stage('Check Tools') {
             steps {
                 bat 'whoami'
+
                 bat '"%GIT_EXE%" --version'
+
                 bat '"%DOCKER_EXE%" version'
+
                 bat '"%PYTHON%" --version'
+
+                bat 'kubectl version --client'
+
+                bat 'kubectl config current-context'
+
+                bat 'kubectl cluster-info'
             }
         }
 
+        // 3. Install only required dependencies
         stage('Install Dependencies') {
             steps {
                 bat '''
-                echo Checking and installing only required dependencies...
+                echo Checking and installing required dependencies...
 
                 "%PYTHON%" -m pip install ^
                     --disable-pip-version-check ^
@@ -61,6 +76,7 @@ pipeline {
             }
         }
 
+        // 4. Run tests if available
         stage('Run Tests') {
             steps {
                 bat '''
@@ -69,75 +85,138 @@ pipeline {
             }
         }
 
+        // 5. Build Web Docker image
         stage('Build Web Image') {
             steps {
-                bat '"%DOCKER_EXE%" build -t %WEB_IMAGE%:%BUILD_NUMBER% -t %WEB_IMAGE%:latest -f Dockerfile.web .'
+                bat '''
+                "%DOCKER_EXE%" build ^
+                    -t %WEB_IMAGE%:%BUILD_NUMBER% ^
+                    -t %WEB_IMAGE%:latest ^
+                    -f Dockerfile.web .
+                '''
             }
         }
 
+        // 6. Build API Docker image
         stage('Build API Image') {
             steps {
-                bat '"%DOCKER_EXE%" build -t %API_IMAGE%:%BUILD_NUMBER% -t %API_IMAGE%:latest -f Dockerfile.api .'
+                bat '''
+                "%DOCKER_EXE%" build ^
+                    -t %API_IMAGE%:%BUILD_NUMBER% ^
+                    -t %API_IMAGE%:latest ^
+                    -f Dockerfile.api .
+                '''
             }
         }
 
+        // 7. Verify Docker images
         stage('Verify Docker Images') {
             steps {
                 bat '"%DOCKER_EXE%" images %WEB_IMAGE%'
+
                 bat '"%DOCKER_EXE%" images %API_IMAGE%'
             }
         }
 
-        stage('Deploy Web and API') {
+        // 8. Deploy application to Kubernetes
+        stage('Deploy to Kubernetes') {
             steps {
-                script {
-                    bat(returnStatus: true, script: '"%DOCKER_EXE%" rm -f %WEB_CONTAINER%')
-                    bat(returnStatus: true, script: '"%DOCKER_EXE%" rm -f %API_CONTAINER%')
-                }
+                echo 'Starting EmoJudge Kubernetes deployment...'
 
-                bat '"%DOCKER_EXE%" run -d --restart unless-stopped --name %API_CONTAINER% -p %API_PORT%:8000 %API_IMAGE%:%BUILD_NUMBER%'
+                // Apply Persistent Volume and Claims
+                bat 'kubectl apply -f k8s/persistent-volume.yaml -n %K8S_NAMESPACE%'
 
-                bat '"%DOCKER_EXE%" run -d --restart unless-stopped --name %WEB_CONTAINER% -p %WEB_PORT%:5000 %WEB_IMAGE%:%BUILD_NUMBER%'
+                // Apply Web and API deployments
+                bat 'kubectl apply -f k8s/deployment.yaml -n %K8S_NAMESPACE%'
+
+                // Apply Kubernetes services
+                bat 'kubectl apply -f k8s/service.yaml -n %K8S_NAMESPACE%'
+
+                // Update Web deployment image
+                bat '''
+                kubectl set image deployment/%WEB_IMAGE% ^
+                    %WEB_CONTAINER%=%WEB_IMAGE%:%BUILD_NUMBER% ^
+                    -n %K8S_NAMESPACE%
+                '''
+
+                // Update API deployment image
+                bat '''
+                kubectl set image deployment/%API_IMAGE% ^
+                    %API_CONTAINER%=%API_IMAGE%:%BUILD_NUMBER% ^
+                    -n %K8S_NAMESPACE%
+                '''
+
+                echo 'Waiting for Web deployment...'
+
+                // Verify Web rollout
+                bat '''
+                kubectl rollout status deployment/%WEB_IMAGE% ^
+                    -n %K8S_NAMESPACE% ^
+                    --timeout=180s
+                '''
+
+                echo 'Waiting for API deployment...'
+
+                // Verify API rollout
+                bat '''
+                kubectl rollout status deployment/%API_IMAGE% ^
+                    -n %K8S_NAMESPACE% ^
+                    --timeout=180s
+                '''
             }
         }
 
+        // 9. Verify Kubernetes deployment
         stage('Verify Deployment') {
             steps {
-                bat '"%DOCKER_EXE%" ps'
+                echo 'Checking Kubernetes deployment status...'
 
-                powershell '''
-                    $containers = @(
-                        "emojudge-web",
-                        "emojudge-api"
-                    )
+                bat 'kubectl get deployments -n %K8S_NAMESPACE%'
 
-                    foreach ($container in $containers) {
-                        $status = & $env:DOCKER_EXE inspect -f '{{.State.Status}}' $container
+                bat 'kubectl get pods -n %K8S_NAMESPACE% -o wide'
 
-                        Write-Host "$container : $status"
+                bat 'kubectl get services -n %K8S_NAMESPACE%'
 
-                        if ($status -ne "running") {
-                            throw "$container deployment failed"
-                        }
-                    }
+                bat '''
+                kubectl get deployment %WEB_IMAGE% -n %K8S_NAMESPACE%
+
+                kubectl get deployment %API_IMAGE% -n %K8S_NAMESPACE%
                 '''
             }
         }
     }
 
     post {
+
         success {
             echo 'SUCCESS: EmoJudge CI/CD pipeline completed.'
-            echo 'Both Web and API containers deployed successfully.'
+            echo 'Web and API deployed successfully to Kubernetes.'
         }
 
         failure {
             echo 'FAILED: EmoJudge CI/CD pipeline failed.'
-            echo 'Check Console Output for the failed stage.'
+            echo 'Check Jenkins Console Output for the failed stage.'
         }
 
         always {
-            bat '"%DOCKER_EXE%" ps -a'
+            echo 'Final Docker image status:'
+
+            bat(
+                returnStatus: true,
+                script: '"%DOCKER_EXE%" images emojudge-web'
+            )
+
+            bat(
+                returnStatus: true,
+                script: '"%DOCKER_EXE%" images emojudge-api'
+            )
+
+            echo 'Final Kubernetes resource status:'
+
+            bat(
+                returnStatus: true,
+                script: 'kubectl get all -n %K8S_NAMESPACE%'
+            )
         }
     }
 }
