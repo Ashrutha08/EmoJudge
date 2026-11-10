@@ -6,7 +6,7 @@ fastapi>=0.110.0
 uvicorn>=0.29.0
 pydantic>=2.0.0
 opencv-python>=4.9.0
-mediapipe>=0.10.0
+mediapipe==0.10.21
 tensorflow>=2.16.0
 tf-keras>=2.16.0
 deepface>=0.0.93
