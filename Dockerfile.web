@@ -1,0 +1,13 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+
+RUN pip install --no-cache-dir flask werkzeug pyjwt requests
+
+COPY . .
+
+EXPOSE 5000
+
+CMD ["python", "-c", "from app import app; app.run(host='0.0.0.0', port=5000)"]
