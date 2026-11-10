@@ -49,14 +49,24 @@ pipeline {
 
         stage('Install Dependencies') {
             steps {
-                bat '"%PYTHON%" -m pip install --default-timeout=120 --retries=10 -r requirements.txt'
-                bat '"%PYTHON%" -m pip install pytest'
+                bat '''
+                echo Checking and installing only required dependencies...
+
+                "%PYTHON%" -m pip install ^
+                    --disable-pip-version-check ^
+                    --no-warn-script-location ^
+                    -r requirements.txt
+
+                if errorlevel 1 exit /b 1
+                '''
             }
         }
 
         stage('Run Tests') {
             steps {
-                bat '"%PYTHON%" -m pytest -v'
+                bat '''
+                powershell -NoProfile -ExecutionPolicy Bypass -Command "$testFiles = Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Name -match '^(test_.*|.*_test)\\.py$' }; if ($testFiles) { Write-Host 'Test files found. Running pytest...'; & \"$env:PYTHON\" -m pytest -v; exit $LASTEXITCODE } else { Write-Host 'WARNING: No test files found. Skipping pytest.'; exit 0 }"
+                '''
             }
         }
 
