@@ -1,67 +1,154 @@
+pipeline {
+    agent any
 
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: emojudge-web
-  namespace: default
-  labels:
-    app: emojudge-web
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: emojudge-web
-  template:
-    metadata:
-      labels:
-        app: emojudge-web
-    spec:
-      containers:
-        - name: emojudge-web
-          image: emojudge-web:latest
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: web
-              containerPort: 5000
-              protocol: TCP
-          resources:
-            requests:
-              cpu: 250m
-              memory: 256Mi
-            limits:
-              cpu: "1"
-              memory: 1Gi
+    triggers {
+        // Fires instantly if a GitHub webhook can reach Jenkins
+        githubPush()
+        // Fallback for a local Jenkins that GitHub cannot reach: checks main for new commits (e.g. merged PRs)
+        pollSCM('H/2 * * * *')
+    }
 
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: emojudge-api
-  namespace: default
-  labels:
-    app: emojudge-api
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: emojudge-api
-  template:
-    metadata:
-      labels:
-        app: emojudge-api
-    spec:
-      containers:
-        - name: emojudge-api
-          image: emojudge-api:latest
-          imagePullPolicy: IfNotPresent
-          ports:
-            - name: api
-              containerPort: 8000
-              protocol: TCP
-          resources:
-            requests:
-              cpu: 500m
-              memory: 1Gi
-            limits:
-              cpu: "2"
-              memory: 4Gi
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        timeout(time: 30, unit: 'MINUTES')
+    }
+
+    environment {
+        WEB_IMAGE = 'emojudge-web'
+        API_IMAGE = 'emojudge-api'
+
+        // Path to the Kubernetes manifest inside the repo (change if yours is elsewhere)
+        K8S_MANIFEST  = 'k8s/deployment.yaml'
+        K8S_NAMESPACE = 'default'
+
+        // Jenkins runs as SYSTEM, which cannot see your user's kubeconfig by default
+        KUBECONFIG = 'C:\\Users\\ANAND L\\.kube\\config'
+
+        GIT_EXE    = 'C:\\Program Files\\Git\\cmd\\git.exe'
+        DOCKER_EXE = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'
+        PYTHON     = 'C:\\Users\\ANAND L\\AppData\\Local\\Programs\\Python\\Python310\\python.exe'
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+
+                bat '"%GIT_EXE%" log -1 --oneline'
+            }
+        }
+
+        stage('Check Tools') {
+            steps {
+                bat 'whoami'
+                bat '"%GIT_EXE%" --version'
+                bat '"%DOCKER_EXE%" version'
+                bat '"%PYTHON%" --version'
+                bat 'kubectl version --client'
+                bat 'kubectl config current-context'
+                bat 'kubectl get nodes'
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                bat '''
+                echo Checking and installing only required dependencies...
+
+                "%PYTHON%" -m pip install ^
+                    --disable-pip-version-check ^
+                    --no-warn-script-location ^
+                    -r requirements.txt
+
+                if errorlevel 1 exit /b 1
+                '''
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                bat '''
+                powershell -NoProfile -ExecutionPolicy Bypass -Command "$testFiles = Get-ChildItem -Path . -Recurse -File | Where-Object { $_.Name -match '^(test_.*|.*_test)\\.py$' }; if ($testFiles) { Write-Host 'Test files found. Running pytest...'; & \"$env:PYTHON\" -m pytest -v; exit $LASTEXITCODE } else { Write-Host 'WARNING: No test files found. Skipping pytest.'; exit 0 }"
+                '''
+            }
+        }
+
+        stage('Build Web Image') {
+            steps {
+                bat '"%DOCKER_EXE%" build -t %WEB_IMAGE%:%BUILD_NUMBER% -t %WEB_IMAGE%:latest -f Dockerfile.web .'
+            }
+        }
+
+        stage('Build API Image') {
+            steps {
+                bat '"%DOCKER_EXE%" build -t %API_IMAGE%:%BUILD_NUMBER% -t %API_IMAGE%:latest -f Dockerfile.api .'
+            }
+        }
+
+        stage('Verify Docker Images') {
+            steps {
+                bat '"%DOCKER_EXE%" images %WEB_IMAGE%'
+                bat '"%DOCKER_EXE%" images %API_IMAGE%'
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            // Deploy only builds of the main branch (i.e. after a merge to main)
+            when {
+                expression { env.GIT_BRANCH == 'origin/main' || env.GIT_BRANCH == 'main' }
+            }
+            steps {
+                // Remove containers left over from the old "docker run" deployment so they do not hold ports 5000/8000
+                script {
+                    bat(returnStatus: true, script: '"%DOCKER_EXE%" rm -f emojudge-web')
+                    bat(returnStatus: true, script: '"%DOCKER_EXE%" rm -f emojudge-api')
+                }
+
+                // Swap ":latest" in the manifest for this build's tag, then apply.
+                // A new tag every build guarantees Kubernetes rolls out new pods.
+                powershell '''
+                    $manifest = Get-Content -Raw -Path $env:K8S_MANIFEST
+                    $manifest = $manifest -replace "$($env:WEB_IMAGE):latest", "$($env:WEB_IMAGE):$($env:BUILD_NUMBER)"
+                    $manifest = $manifest -replace "$($env:API_IMAGE):latest", "$($env:API_IMAGE):$($env:BUILD_NUMBER)"
+
+                    $manifest | kubectl apply -n $env:K8S_NAMESPACE -f -
+                    if ($LASTEXITCODE -ne 0) { throw "kubectl apply failed" }
+                '''
+            }
+        }
+
+        stage('Verify Deployment') {
+            when {
+                expression { env.GIT_BRANCH == 'origin/main' || env.GIT_BRANCH == 'main' }
+            }
+            steps {
+                bat 'kubectl rollout status deployment/emojudge-api -n %K8S_NAMESPACE% --timeout=300s'
+                bat 'kubectl rollout status deployment/emojudge-web -n %K8S_NAMESPACE% --timeout=300s'
+                bat 'kubectl get pods -n %K8S_NAMESPACE% -o wide'
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'SUCCESS: EmoJudge CI/CD pipeline completed.'
+            echo 'Web and API deployed to Kubernetes.'
+        }
+
+        failure {
+            echo 'FAILED: EmoJudge CI/CD pipeline failed.'
+            echo 'Check Console Output for the failed stage.'
+        }
+
+        always {
+            echo 'Final Docker image status:'
+            bat(returnStatus: true, script: '"%DOCKER_EXE%" images %WEB_IMAGE%')
+            bat(returnStatus: true, script: '"%DOCKER_EXE%" images %API_IMAGE%')
+
+            echo 'Final Kubernetes resource status:'
+            bat(returnStatus: true, script: 'kubectl get all -n %K8S_NAMESPACE%')
+        }
+    }
+}
