@@ -72,7 +72,7 @@ pipeline {
 
         stage('Build Web Image') {
             steps {
-                bat '"%DOCKER_EXE%" build -t %WEB_IMAGE%:%BUILD_NUMBER% -t %WEB_IMAGE%:latest -f Dockerfile .'
+                bat 'docker build -t emojudge-web:4 -t emojudge-web:latest -f Dockerfile.web .'
             }
         }
 
