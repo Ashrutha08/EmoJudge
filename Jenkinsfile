@@ -1,4 +1,3 @@
-
 pipeline {
     agent any
 
@@ -72,7 +71,7 @@ pipeline {
 
         stage('Build Web Image') {
             steps {
-                bat 'docker build -t emojudge-web:4 -t emojudge-web:latest -f Dockerfile.web .'
+                bat '"%DOCKER_EXE%" build -t %WEB_IMAGE%:%BUILD_NUMBER% -t %WEB_IMAGE%:latest -f Dockerfile.web .'
             }
         }
 
