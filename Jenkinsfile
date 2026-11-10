@@ -23,6 +23,7 @@ pipeline {
         API_PORT = '8000'
 
         K8S_NAMESPACE = 'default'
+        KUBECONFIG = 'C:\\Users\\ANAND L\\.kube\\config'
 
         GIT_EXE = 'C:\\Program Files\\Git\\cmd\\git.exe'
         DOCKER_EXE = 'C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.exe'
